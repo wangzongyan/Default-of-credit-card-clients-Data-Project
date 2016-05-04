@@ -4,6 +4,204 @@ author: "Zongyan Wang"
 date: "March 29, 2016"
 output: pdf_document
 ---
+## Load package and source file
+```{r load package}
+require(data.table)
+require(shiny)
+require(testthat)
+require(ggplot2)
+require(plyr)
+require(dplyr)
+require(reshape2)
+require(scales)
+library(neuralnet)
+#require(nnet)
+require(kernlab)
+require(gridExtra)
+require(caret) # Cross - Validation k fold
+source("analysis_f.R")
+source("clean_f.R")
+source("plot_f.R")
+```
+## Read data
+```{r read data}
+df = fread("../default of credit card clients.csv", header = T, skip = 1)
+df = as.data.frame(df)
+```
+## Explore data
+```{r Explore data}
+names(df)[length(names(df))] = "default"
+# Check missing value
+hasNA_all(df)
+# Remove ID column
+df <- df %>% dplyr::select(-ID)
+# Data size
+dim(df)
+# Histogram of the response variable
+hist(df$default, col = "skyblue", border = "white", 
+     main = "Histogram of Default", xlab = "Status", 
+     freq = T)
+```
+## Data Clean
 ```{r}
+# Set the column with categorical values to factor
+df$SEX <- as.factor(df$SEX)
+df$EDUCATION <- as.factor(df$EDUCATION)
+df$MARRIAGE <- as.factor(df$MARRIAGE)
+df$default <- as.factor(df$default)
+# Transfer Categorical data to different column
+df.categorical <- df[,names(n.factor_all(df))]
+df.categorical <- df.categorical %>% dplyr::select(-default)
+df.numeric <- df[,!names(df) %in% names(n.factor_all(df))]
+# Transform the categorical column to multiple numeric columns
+categorical.list <- apply(df.categorical, 2, function(x) model.matrix(~ x + 0))
+df1 <- as.data.frame(cbind(categorical.list, df.numeric))
+df1$default <- df$default
+names(df1)[1:2] <- c("sex.m", "sex.f")
+names(df1)[10:12] <- c("marriage.m", "marriage.s", "marriage.o")
+df <- df1
+df$default <- as.numeric(as.character(df$default))
+```
+## Data Prepare
+```{r}
+# Sample a train set and a test set
+test.index <- sample(1:30000, size = 1000, replace = F)
+test <- df[test.index,]
+train <- df[-test.index,]
+dim(train)
+dim(test)
+```
+## Logistic Regression
+```{r}
+l <- glm(default~., data = train, family=binomial(link = "logit"))
+pred <- predict(l, train, type = "response")
+compare.data <- data.frame(pred = pred, true = train$default)
+pred1 <- as.numeric(pred > 0.5)
+# in-sample error
+error.l <- 1 - sum(pred1 == train$default, na.rm = T)/length(pred1)
+error.l
+# error of pred = 0, true = 1
+error1.l <- sum(pred1 == 0 & train$default == 1, na.rm = T)/sum(train$default == 1)
+error1.l
+# The ratio of default and the whole training data
+sum(train$default == 1)/(length(train$default))
+# prediction distribution
+pred_type_plot <- plot_pred_type_distribution(compare.data, 0.5)
+print(pred_type_plot)
+```
+## Neural Network
+### Fit the model
+```{r}
+# This file make use of the training set and build a neural network model
+n <- names(train)
+f <- as.formula(paste("default ~", paste(n[!n %in% "default"], collapse = " + ")))
+nn <- neuralnet(f,data=train,hidden=c(10),linear.output=T)
+#nn <- nnet(x=train %>% dplyr::select(-default),
+#           y=train %>% dplyr::select(default),size=10,linout=T)
+#import function from Github
+#require(RCurl)
+ 
+#root.url<-'https://gist.github.com/fawda123'
+#raw.fun<-paste(
+#  root.url,
+#  '5086859/raw/17fd6d2adec4dbcf5ce750cbd1f3e0f4be9d8b19/nnet_plot_fun.r',
+#  sep='/'
+#  )
+#script<-getURL(raw.fun, ssl.verifypeer = FALSE)
+#eval(parse(text = script))
+#rm('script','raw.fun')
+```
+### Prediction
+```{r}
+plot(nn)
+pr.nn <- compute(nn,train[,-length(train[1,])])
+pr.nn_ <- pr.nn$net.result*(max(train$default)-min(train$default))+min(train$default)
+train.r <- (train$default)*(max(train$default)-min(train$default))+min(train$default)
+compare.data.nn <- data.frame(pred = pr.nn_, true = train.r)
+error.nn <- sum((train.r != (pr.nn_>.5)))/nrow(train)
+# in-sample error
+error.nn
 
+# error of pred = 0, true = 1
+error1.nn <- sum((pr.nn_>.5) == 0 & train$default == 1, na.rm = T)/sum(train$default == 1)
+error1.nn
+# prediction distribution
+pred_type_plot.nn <- plot_pred_type_distribution(compare.data.nn, 0.5)
+print(pred_type_plot.nn)
+ggsave(filename = "pred_type_plot_nn.png", plot = pred_type_plot.nn, path = ".",  
+       width = 10, height = 6, dpi = 400)
+```
+### Use ROC to improve the performance
+```{r}
+# Calculate the roc(FP: pred=1,true=0; FN:pred=0, true=1)
+roc.nn <- calculate_roc(compare.data.nn, 1, 1, n = 100)
+# Plot the roc, cost of FP = 1, cost of FN = 5
+plot.roc.nn <- plot_roc(roc.nn, 0.5, 1, 1)
+```
+## Gaussian Kernel SVM
+### Fit the model
+```{r}
+train.Y <- as.matrix(train %>% dplyr::select(default))
+train.X <- as.matrix(train %>% dplyr::select(-default))
+kern <- ksvm(train.X, train.Y, kernel = "rbfdot", type = "C-svc")
+kern.l <- ksvm(train.X, train.Y, kernel = "vanilladot", type = "C-svc")
+kern.p <- ksvm(train.X, train.Y, kernel = "polydot", type = "C-svc", kpar = list(degree = 6))
+# In-sample error
+pred.kern <- predict(kern, train.X)
+###
+compare.data.kern <- data.frame(pred = pred.kern, true = train.Y)
+names(compare.data.kern) <- c("pred", "true")
+# in-sample prediction accuracy
+# prediction accuracy when threshold = 0.5
+pred.kern1 = as.numeric(pred.kern > 0.5)
+error.kern = 1 - sum(pred.kern1 == train.Y, na.rm = T)/length(pred.kern1)
+error.kern
+# Prediction and true status when threshold = 0.5 plot
+pred_type_plot.kern <- plot_pred_type_distribution(compare.data.kern, 0.5)
+# Support vector number
+pred_type_plot.kern
+kern
+
+```
+### Use ROC to improve the performance
+```{r}
+# Calculate the roc(FP: pred=1,true=0; FN:pred=0, true=1)
+roc.kern <- calculate_roc(compare.data.kern, 1, 1, n = 100)
+# Plot the roc, cost of FP = 1, cost of FN = 5
+plot.roc.kern <- plot_roc(roc.kern, 0.5, 1, 1)
+# prediction accuracy when threshold = 0.5
+pred.kern2 = as.numeric(pred.kern1 > 0.5)
+error.kern2 = 1 - sum(pred.kern2 == train.Y, na.rm = T)/length(pred.kern2)
+error.kern2
+# error that pred = 0, true = 1
+error1.kern2 = sum(pred.kern2 == 0 & train.Y == 1, na.rm = T)/sum(train.Y == 1)
+error1.kern2
+# Prediction and true status when threshold = 0.5 plot
+pred_type_plot.kern2 <- plot_pred_type_distribution(compare.data.kern, 0.4)
+pred_type_plot.kern2
+# Error on test data
+test.Y <- as.matrix(test %>% dplyr::select(default))
+test.X <- as.matrix(test %>% dplyr::select(-default))
+kern.test <- predict(kern, test.X)
+kern.test1 = as.numeric(kern.test > 0.5)
+error.kern.test = 1 - sum(kern.test1 == test.Y, na.rm = T)/length(test.Y)
+error.kern.test
+# test set error that pred = 0, true = 1
+error1.kern.test1 = sum(kern.test1 == 0 & test.Y == 1, na.rm = T)/sum(test.Y == 1)
+error1.kern.test1
+```
+### Use Cross-Validation to choose C
+```{r}
+#error.cv1 <- cv_ksvm(train, threshold = 0.4, C = c(.001, .01, .1, .5, 1))
+error.cv <- data.frame(C = c(.001, .01, .1, .5, 1, 10, 100), 
+                       error = c(.218276, .201379, .181724, .1768966, .1706897, .1710345, .1851724))
+error.cv_plot1 <- error.cv %>% ggplot(aes(x = C, y = error)) +
+  geom_line() +
+  geom_point(aes(color = as.character(C)), size = 4) +
+  labs(title = "Plot: C and Cross-validation error", color = "C")
+error.cv_plot1
+ggsave(filename = "C and Cross-validation plot1.png", 
+       plot = error.cv_plot1, path = ".",  
+       width = 10, height = 6, dpi = 400)
+#error.cv2 <- cv_ksvm(train, threshold = 0.4, C = c(1, 10, 100))
 ```
